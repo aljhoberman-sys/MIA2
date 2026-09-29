@@ -1,0 +1,6 @@
+.venv/
+audio/
+__pycache__/
+*.pyc
+.DS_Store
+local_config.json
