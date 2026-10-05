@@ -13,7 +13,7 @@ const S = {
   pieces: [], notes: [], total: 0,
   pxPerSec: 1, scroll: 0, playhead: 0,
   playing: false, dimmed: false,
-  smooth: 60, scaleMode: 'own', dB: false, notesMode: false,
+  smooth: 23, scaleMode: 'own', dB: false, notesMode: false,
   globalPeak: 1,
   pending: [],      // pieces named by an opened session, still waiting for their audio
   undo: null,       // last removed piece, restorable for a short while
@@ -120,8 +120,13 @@ function envelope(buf) {
   return out;
 }
 
+// slider 0..100 runs from 10 s (Gentle) to 0.1 s (Precise); the default of about 3.5 s
+// matches the smoothing in Bonde's MIA profiles
+const smoothSec = v => 0.1 * Math.pow(100, (100 - v) / 100);
+const smoothSlider = sec => cl(Math.round(100 - 100 * Math.log(sec / 0.1) / Math.log(100)), 0, 100);
+
 function recompute() {
-  const sec = 0.05 * Math.pow(60, (100 - S.smooth) / 100);
+  const sec = smoothSec(S.smooth);
   const w = Math.max(1, Math.round(sec / HOP)), half = w >> 1;
   let gp = 1e-9;
   for (const p of S.pieces) {
@@ -518,7 +523,7 @@ async function saveSession() {
   }
   const data = {
     app: 'MIA 2', version: 1, sessionId: S.sessionId, savedAt: new Date().toISOString(),
-    settings: { smooth: S.smooth, scale: S.scaleMode, dB: S.dB },
+    settings: { smooth: S.smooth, smoothSec: +smoothSec(S.smooth).toFixed(3), scale: S.scaleMode, dB: S.dB },
     pieces: S.pieces.map(p => ({ id: p.id, file: p.file, title: p.title, color: p.color, dur: +p.dur.toFixed(3) })),
     notes: S.notes.filter(n => byId(n.pieceId)).map(n => ({ pieceId: n.pieceId, offset: +n.offset.toFixed(3), text: n.text })),
   };
@@ -568,7 +573,10 @@ async function openSession(file) {
   nextId = Math.max(nextId, ...data.pieces.map(p => p.id)) + 1;
   S.notes = (data.notes || []).map(n => ({ id: nextId++, pieceId: n.pieceId, offset: n.offset, text: n.text, box: null }));
   const st = data.settings || {};
-  S.smooth = cl(+st.smooth || 60, 0, 100); S.scaleMode = st.scale === 'program' ? 'program' : 'own'; S.dB = !!st.dB;
+  // sessions saved before smoothSec existed used a 0.05..3 s slider
+  S.smooth = st.smoothSec ? smoothSlider(+st.smoothSec)
+    : st.smooth != null ? smoothSlider(0.05 * Math.pow(60, (100 - cl(+st.smooth, 0, 100)) / 100)) : 23;
+  S.scaleMode = st.scale === 'program' ? 'program' : 'own'; S.dB = !!st.dB;
   $('smooth').value = S.smooth; $('scale').value = S.scaleMode; $('ydb').value = S.dB ? 'db' : 'lin';
   S.sessionId = data.sessionId || null;
   S.playhead = 0; layout(); fit(); updateTime(); refreshStatus();
@@ -726,6 +734,7 @@ $('file').onchange = e => { addFiles([...e.target.files]); e.target.value = ''; 
 $('play').onclick = () => (S.playing ? pause() : play());
 $('stop').onclick = stop;
 $('fit').onclick = fit;
+$('smooth').value = S.smooth;
 $('smooth').oninput = e => { S.smooth = +e.target.value; recompute(); redraw(); };
 $('zoom').oninput = e => {
   const mn = minPx(), px = mn * Math.pow(Math.max(1, MAX_PX / mn), e.target.value / 100);
