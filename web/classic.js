@@ -14,7 +14,7 @@ const S = {
   pieces: [], notes: [], total: 0,
   pxPerSec: 1, scroll: 0, playhead: 0,
   playing: false, dimmed: false,
-  smooth: 23, scaleMode: 'own', dB: false, notesMode: false,
+  smooth: 23, scaleMode: 'program', dB: false, notesMode: false,
   globalPeak: 1, globalMiniPeak: 1,
   pending: [],      // pieces named by an opened session, still waiting for their audio
   undo: null,       // last removed piece, restorable for a short while
@@ -582,7 +582,7 @@ async function openSession(file) {
   // sessions saved before smoothSec existed used a 0.05..3 s slider
   S.smooth = st.smoothSec ? smoothSlider(+st.smoothSec)
     : st.smooth != null ? smoothSlider(0.05 * Math.pow(60, (100 - cl(+st.smooth, 0, 100)) / 100)) : 23;
-  S.scaleMode = st.scale === 'program' ? 'program' : 'own'; S.dB = !!st.dB;
+  S.scaleMode = st.scale === 'own' ? 'own' : 'program'; S.dB = !!st.dB;
   $('smooth').value = S.smooth; $('scale').value = S.scaleMode; $('ydb').value = S.dB ? 'db' : 'lin';
   S.sessionId = data.sessionId || null;
   S.playhead = 0; layout(); fit(); updateTime(); refreshStatus();
@@ -740,7 +740,7 @@ $('file').onchange = e => { addFiles([...e.target.files]); e.target.value = ''; 
 $('play').onclick = () => (S.playing ? pause() : play());
 $('stop').onclick = stop;
 $('fit').onclick = fit;
-$('smooth').value = S.smooth;
+$('smooth').value = S.smooth; $('scale').value = S.scaleMode;
 $('smooth').oninput = e => { S.smooth = +e.target.value; recompute(); redraw(); };
 $('zoom').oninput = e => {
   const mn = minPx(), px = mn * Math.pow(Math.max(1, MAX_PX / mn), e.target.value / 100);
