@@ -75,11 +75,42 @@ const minPx = () => (S.total ? W / S.total : 1);
 
 /* ---------- analysis ---------- */
 
+/* A-weighting (IEC 61672) as first-order sections, bilinear transform with prewarped poles.
+   Bonde's MIA profiles match an A-weighted level much better than flat RMS: the bass drum
+   and drones that fill the quiet gaps count for little, so the dips between phrases go deep. */
+function aWeightSections(sr) {
+  const K = 2 * sr, w = f => K * Math.tan(Math.PI * f / sr);
+  const hp = f => { const p = w(f); return { b0: K / (K + p), b1: -K / (K + p), a1: (p - K) / (K + p) }; };
+  const lp = f => { const p = w(f); return { b0: p / (K + p), b1: p / (K + p), a1: (p - K) / (K + p) }; };
+  const secs = [hp(20.598997), hp(20.598997), hp(107.65265), hp(737.86223), lp(12194.217), lp(12194.217)];
+  // scale to 0 dB at 1 kHz
+  const z = { re: Math.cos(2 * Math.PI * 1000 / sr), im: -Math.sin(2 * Math.PI * 1000 / sr) };
+  let g = 1;
+  for (const s of secs) {
+    const nr = s.b0 + s.b1 * z.re, ni = s.b1 * z.im, dr = 1 + s.a1 * z.re, di = s.a1 * z.im;
+    g *= Math.hypot(nr, ni) / Math.hypot(dr, di);
+  }
+  secs[0].b0 /= g; secs[0].b1 /= g;
+  return secs;
+}
+
+function aWeight(x, secs) {
+  const y = Float32Array.from(x);
+  for (const { b0, b1, a1 } of secs) {
+    let x1 = 0, y1 = 0;
+    for (let i = 0; i < y.length; i++) {
+      const v = b0 * y[i] + b1 * x1 - a1 * y1;
+      x1 = y[i]; y1 = v; y[i] = v;
+    }
+  }
+  return y;
+}
+
 function envelope(buf) {
   const sr = buf.sampleRate, n = buf.length, blk = Math.round(sr * HOP), cnt = Math.ceil(n / blk);
   const out = new Float32Array(cnt);
-  const chs = [];
-  for (let c = 0; c < buf.numberOfChannels; c++) chs.push(buf.getChannelData(c));
+  const secs = aWeightSections(sr), chs = [];
+  for (let c = 0; c < buf.numberOfChannels; c++) chs.push(aWeight(buf.getChannelData(c), secs));
   for (let i = 0; i < cnt; i++) {
     const a = i * blk, b = Math.min(n, a + blk);
     let s = 0;
