@@ -37,6 +37,34 @@ const waitingText = () => S.pending.length
 const refreshStatus = () => status(waitingText());
 const baseName = n => n.replace(/\.[^.]+$/, '').toLowerCase();
 
+/* Remembered file locations (Chrome and Edge only): the picker gives a handle to each file,
+   and handles can be kept in IndexedDB so a saved session can find its audio again. */
+const handleOf = new WeakMap();   // File -> FileSystemFileHandle
+const claimOf = new WeakMap();    // File -> pending session piece it was reconnected for
+const canRemember = !!window.showOpenFilePicker;
+
+const idb = () => new Promise((res, rej) => {
+  const r = indexedDB.open('mia2', 1);
+  r.onupgradeneeded = () => r.result.createObjectStore('handles');
+  r.onsuccess = () => res(r.result);
+  r.onerror = () => rej(r.error);
+});
+async function idbPut(key, val) {
+  const db = await idb();
+  return new Promise((res, rej) => {
+    const t = db.transaction('handles', 'readwrite');
+    t.objectStore('handles').put(val, key);
+    t.oncomplete = () => res(); t.onerror = () => rej(t.error);
+  });
+}
+async function idbGet(key) {
+  const db = await idb();
+  return new Promise((res, rej) => {
+    const rq = db.transaction('handles').objectStore('handles').get(key);
+    rq.onsuccess = () => res(rq.result); rq.onerror = () => rej(rq.error);
+  });
+}
+
 // small × on each title bar; null when the piece is too narrow on screen
 function closeBox(p) {
   const x1 = Math.min(timeToX(p.start + p.dur), W), x0 = Math.max(timeToX(p.start), 0);
@@ -375,11 +403,13 @@ async function addFiles(files, index) {
       const buffer = await ac.decodeAudioData(await f.arrayBuffer());
       await new Promise(r => setTimeout(r, 0));
       // an opened session claims files by exact name first, then by name without extension
-      const pend = S.pending.find(q => q.file.toLowerCase() === f.name.toLowerCase())
+      const claimed = claimOf.get(f);
+      const pend = (claimed && S.pending.includes(claimed) ? claimed : null)
+        || S.pending.find(q => q.file.toLowerCase() === f.name.toLowerCase())
         || S.pending.find(q => baseName(q.file) === baseName(f.name));
       const id = pend ? pend.id : nextId++;
       const piece = {
-        id, file: f.name, title: pend ? pend.title : f.name.replace(/\.[^.]+$/, ''),
+        id, file: f.name, handle: handleOf.get(f) || null, title: pend ? pend.title : f.name.replace(/\.[^.]+$/, ''),
         color: pend ? pend.color : PALETTE[(id - 1) % PALETTE.length],
         buffer, dur: buffer.duration, env: envelope(buffer), sm: null, peak: 1, start: 0,
         sessionIdx: pend ? pend.sessionIdx : undefined,
@@ -444,11 +474,19 @@ function undoRemove() {
 
 /* ---------- sessions ---------- */
 
-function saveSession() {
+async function saveSession() {
   if (S.pending.length) { status('Add the remaining audio files before saving.'); return; }
   if (!S.pieces.length) { status('Nothing to save yet.'); return; }
+  if (!S.sessionId) S.sessionId = crypto.randomUUID();
+  let remembered = 0;
+  if (canRemember) {
+    for (const p of S.pieces) {
+      if (!p.handle) continue;
+      try { await idbPut(S.sessionId + ':' + p.id, p.handle); remembered++; } catch (e) { /* storage unavailable */ }
+    }
+  }
   const data = {
-    app: 'MIA 2', version: 1, savedAt: new Date().toISOString(),
+    app: 'MIA 2', version: 1, sessionId: S.sessionId, savedAt: new Date().toISOString(),
     settings: { smooth: S.smooth, scale: S.scaleMode, dB: S.dB },
     pieces: S.pieces.map(p => ({ id: p.id, file: p.file, title: p.title, color: p.color, dur: +p.dur.toFixed(3) })),
     notes: S.notes.filter(n => byId(n.pieceId)).map(n => ({ pieceId: n.pieceId, offset: +n.offset.toFixed(3), text: n.text })),
@@ -459,7 +497,30 @@ function saveSession() {
   a.download = 'mia-session-' + new Date().toISOString().slice(0, 10) + '.json';
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-  status('Session saved. It holds your order, titles, colors and notes, but not the audio.');
+  status('Session saved. It holds your order, titles, colors and notes, but not the audio.'
+    + (remembered ? ' This browser also remembered where ' + remembered + ' of the files are.' : ''));
+}
+
+// look up remembered file locations for pending session pieces; interactive = called from a click
+async function reconnect(interactive) {
+  if (!canRemember || !S.sessionId || !S.pending.length) { $('reconnect').hidden = true; return; }
+  const ready = [];
+  let needPermission = 0;
+  for (const q of [...S.pending]) {
+    let h = null;
+    try { h = await idbGet(S.sessionId + ':' + q.id); } catch (e) { /* storage unavailable */ }
+    if (!h) continue;
+    let perm = 'prompt';
+    try { perm = await h.queryPermission({ mode: 'read' }); } catch (e) { /* unsupported */ }
+    if (perm !== 'granted' && interactive) {
+      try { perm = await h.requestPermission({ mode: 'read' }); } catch (e) { /* declined */ }
+    }
+    if (perm === 'granted') {
+      try { const f = await h.getFile(); handleOf.set(f, h); claimOf.set(f, q); ready.push(f); } catch (e) { /* moved or deleted */ }
+    } else needPermission++;
+  }
+  if (ready.length) await addFiles(ready);
+  $('reconnect').hidden = !needPermission;
 }
 
 async function openSession(file) {
@@ -478,7 +539,9 @@ async function openSession(file) {
   const st = data.settings || {};
   S.smooth = cl(+st.smooth || 60, 0, 100); S.scaleMode = st.scale === 'program' ? 'program' : 'own'; S.dB = !!st.dB;
   $('smooth').value = S.smooth; $('scale').value = S.scaleMode; $('ydb').value = S.dB ? 'db' : 'lin';
+  S.sessionId = data.sessionId || null;
   S.playhead = 0; layout(); fit(); updateTime(); refreshStatus();
+  await reconnect(false);
 }
 
 function place(pop, x, y) {
@@ -608,7 +671,22 @@ mini.addEventListener('pointerup', () => { drag = null; });
 
 /* ---------- toolbar and page wiring ---------- */
 
-$('add').onclick = () => $('file').click();
+$('add').onclick = async () => {
+  if (!canRemember) { $('file').click(); return; }
+  try {
+    // the picker hands back file handles, which lets a saved session find these files again
+    const handles = await window.showOpenFilePicker({
+      multiple: true,
+      types: [{ description: 'Audio', accept: { 'audio/*': ['.mp3', '.wav', '.m4a', '.flac', '.ogg', '.aac', '.aif', '.aiff'] } }],
+    });
+    const files = [];
+    for (const h of handles) { const f = await h.getFile(); handleOf.set(f, h); files.push(f); }
+    addFiles(files);
+  } catch (err) {
+    if (err.name !== 'AbortError') $('file').click();
+  }
+};
+$('reconnect').onclick = () => reconnect(true);
 $('openSession').onclick = () => $('sessionFile').click();
 $('sessionFile').onchange = e => { if (e.target.files[0]) openSession(e.target.files[0]); e.target.value = ''; };
 $('saveSession').onclick = saveSession;
@@ -656,12 +734,22 @@ $('nDelete').onclick = () => { S.notes = S.notes.filter(n => n !== editingNote);
 $('nDone').onclick = closePops;
 
 window.addEventListener('dragover', e => e.preventDefault());
-window.addEventListener('drop', e => {
+window.addEventListener('drop', async e => {
   e.preventDefault();
-  const sess = [...e.dataTransfer.files].find(f => /\.json$/i.test(f.name));
-  if (sess) { openSession(sess); return; }
-  const files = [...e.dataTransfer.files].filter(f => f.type.startsWith('audio/') || /\.(mp3|wav|m4a|flac|ogg|aac|aif+)$/i.test(f.name));
-  if (!files.length) return;
+  // the drop's items are only readable during this event, so take files and handles now
+  const dropped = [...e.dataTransfer.items].filter(i => i.kind === 'file').map(i => ({
+    file: i.getAsFile(),
+    handle: i.getAsFileSystemHandle ? i.getAsFileSystemHandle().catch(() => null) : null,
+  })).filter(d => d.file);
+  const sess = dropped.find(d => /\.json$/i.test(d.file.name));
+  if (sess) { openSession(sess.file); return; }
+  const audioDrops = dropped.filter(d => d.file.type.startsWith('audio/') || /\.(mp3|wav|m4a|flac|ogg|aac|aif+)$/i.test(d.file.name));
+  if (!audioDrops.length) return;
+  for (const d of audioDrops) {
+    const h = d.handle && await d.handle;
+    if (h && h.kind === 'file') handleOf.set(d.file, h);
+  }
+  const files = audioDrops.map(d => d.file);
   let idx = null;
   const r = canvas.getBoundingClientRect();
   if (S.pieces.length && e.clientY >= r.top && e.clientY <= r.bottom) {
@@ -698,5 +786,5 @@ window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', red
 resize();
 updateTime();
 
-window.MIA = { S, addFiles, seek, play, pause, saveSession, openSession, removePiece, undoRemove };
+window.MIA = { S, addFiles, seek, play, pause, saveSession, openSession, removePiece, undoRemove, handleOf };
 })();
