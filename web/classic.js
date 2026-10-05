@@ -8,13 +8,14 @@ const RULER_H = 26, HEAD_H = 26, NOTES_H = 32;
 const TOP_FRAC = 0.92;            // tallest point sits at this fraction of the plot height
 const MAX_PX = 120;               // most zoomed-in: pixels per second
 const H = 340, MH = 78;
+const MINI_SMOOTH = 10;          // seconds of smoothing in the mini-map, independent of the slider
 
 const S = {
   pieces: [], notes: [], total: 0,
   pxPerSec: 1, scroll: 0, playhead: 0,
   playing: false, dimmed: false,
   smooth: 23, scaleMode: 'own', dB: false, notesMode: false,
-  globalPeak: 1,
+  globalPeak: 1, globalMiniPeak: 1,
   pending: [],      // pieces named by an opened session, still waiting for their audio
   undo: null,       // last removed piece, restorable for a short while
 };
@@ -125,29 +126,34 @@ function envelope(buf) {
 const smoothSec = v => 0.1 * Math.pow(100, (100 - v) / 100);
 const smoothSlider = sec => cl(Math.round(100 - 100 * Math.log(sec / 0.1) / Math.log(100)), 0, 100);
 
-function recompute() {
-  const sec = smoothSec(S.smooth);
-  const w = Math.max(1, Math.round(sec / HOP)), half = w >> 1;
-  let gp = 1e-9;
-  for (const p of S.pieces) {
-    const e = p.env, n = e.length, P = new Float64Array(n + 1);
-    for (let i = 0; i < n; i++) P[i + 1] = P[i] + e[i];
-    const sm = new Float32Array(n);
-    let pk = 1e-9;
-    for (let i = 0; i < n; i++) {
-      const a = Math.max(0, i - half), b = Math.min(n, i + half + 1);
-      const v = (P[b] - P[a]) / (b - a);
-      sm[i] = v;
-      if (v > pk) pk = v;
-    }
-    p.sm = sm; p.peak = pk;
-    gp = Math.max(gp, pk);
+// moving average over `sec` seconds; returns the smoothed envelope and its peak
+function boxSmooth(e, sec) {
+  const w = Math.max(1, Math.round(sec / HOP)), half = w >> 1, n = e.length, P = new Float64Array(n + 1);
+  for (let i = 0; i < n; i++) P[i + 1] = P[i] + e[i];
+  const sm = new Float32Array(n);
+  let pk = 1e-9;
+  for (let i = 0; i < n; i++) {
+    const a = Math.max(0, i - half), b = Math.min(n, i + half + 1);
+    sm[i] = (P[b] - P[a]) / (b - a);
+    if (sm[i] > pk) pk = sm[i];
   }
-  S.globalPeak = gp;
+  return { sm, pk };
 }
 
-function yval(p, v) {
-  const r = v / (S.scaleMode === 'own' ? p.peak : S.globalPeak);
+function recompute() {
+  const sec = smoothSec(S.smooth);
+  let gp = 1e-9, gm = 1e-9;
+  for (const p of S.pieces) {
+    ({ sm: p.sm, pk: p.peak } = boxSmooth(p.env, sec));
+    // the mini-map is a whole-program overview: Bonde's program mini-maps match ~10 s smoothing
+    if (!p.miniSm) ({ sm: p.miniSm, pk: p.miniPeak } = boxSmooth(p.env, MINI_SMOOTH));
+    gp = Math.max(gp, p.peak); gm = Math.max(gm, p.miniPeak);
+  }
+  S.globalPeak = gp; S.globalMiniPeak = gm;
+}
+
+function yval(p, v, mini) {
+  const r = v / (S.scaleMode === 'own' ? (mini ? p.miniPeak : p.peak) : (mini ? S.globalMiniPeak : S.globalPeak));
   return S.dB ? cl((20 * Math.log10(Math.max(r, 1e-6)) + 60) / 60, 0, 1) : cl(r, 0, 1);
 }
 
@@ -159,8 +165,8 @@ function layout() {
 
 /* ---------- drawing ---------- */
 
-function buildPath(p, xa, xb, x2t, top, h) {
-  const n = p.sm.length, line = new Path2D(), base = top + h;
+function buildPath(p, xa, xb, x2t, top, h, mini) {
+  const src = mini ? p.miniSm : p.sm, n = src.length, line = new Path2D(), base = top + h;
   let first = true, lastX = xa;
   for (let x = xa; x <= xb; x++) {
     const ta = x2t(x) - p.start, tb = x2t(x + 1) - p.start;
@@ -168,8 +174,8 @@ function buildPath(p, xa, xb, x2t, top, h) {
     const i1 = cl(Math.ceil(tb / HOP), i0, n - 1);
     const st = Math.max(1, Math.floor((i1 - i0) / 8));
     let mx = 0;
-    for (let i = i0; i <= i1; i += st) if (p.sm[i] > mx) mx = p.sm[i];
-    const y = base - yval(p, mx) * h * TOP_FRAC;
+    for (let i = i0; i <= i1; i += st) if (src[i] > mx) mx = src[i];
+    const y = base - yval(p, mx, mini) * h * TOP_FRAC;
     if (first) { line.moveTo(x, y); first = false; } else line.lineTo(x, y);
     lastX = x;
   }
@@ -315,7 +321,7 @@ function drawMini(T) {
 
   for (const p of S.pieces) {
     const xa = Math.round(t2x(p.start)), xb = Math.round(t2x(p.start + p.dur));
-    const built = buildPath(p, xa, xb, x2t, top, h);
+    const built = buildPath(p, xa, xb, x2t, top, h, true);
     paint(m, built, p.color, S.dimmed, playX, MH, 1.2);
     m.strokeStyle = T.line; m.beginPath(); m.moveTo(xa + 0.5, 0); m.lineTo(xa + 0.5, MH); m.stroke();
     m.save(); m.beginPath(); m.rect(xa, 0, xb - xa, 16); m.clip();
