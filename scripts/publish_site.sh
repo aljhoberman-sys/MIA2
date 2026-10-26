@@ -1,6 +1,6 @@
 #!/bin/sh
 # Publish the browser app (web/ only) to the public repo that GitHub Pages serves.
-# The MIA2 repo itself stays private; only index.html and classic.js are copied.
+# Only the app files and LICENSE are copied.
 set -eu
 
 SITE_REPO="aljhoberman-sys/mia2-app"
@@ -9,11 +9,11 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 gh repo clone "$SITE_REPO" "$WORK/site" -- --quiet
-cp "$ROOT/web/index.html" "$ROOT/web/classic.js" "$WORK/site/"
+cp "$ROOT/web/index.html" "$ROOT/web/classic.js" "$ROOT/LICENSE" "$WORK/site/"
 touch "$WORK/site/.nojekyll"
 
 cd "$WORK/site"
-git add index.html classic.js .nojekyll
+git add index.html classic.js LICENSE .nojekyll
 if git diff --cached --quiet; then
   echo "Site already up to date."
   exit 0
