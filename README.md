@@ -10,6 +10,7 @@ MIA 2 is a browser-based tool for drawing the volume contour of a music program,
 - Smoothing from 0.1 to 20 s (default about 3.5 s), linear or decibel volume axis, and one shared scale for the whole program or each piece to its own peak.
 - Reorder, rename, recolor and remove pieces, and add notes at points in time.
 - Play the program back with a moving playhead, zoom and scroll, save the chart as an image or print it.
+- The current program, audio included, is kept in your browser as you work, so reloading the page or reopening the tab brings it back. Use New to start over.
 - Save a session file that keeps the chart, order, titles, colors and notes, so it opens without the audio. Optionally save one .zip that also holds the audio.
 
 Level is measured A-weighted on a linear scale, which matches the contours of the original MIA closely.
