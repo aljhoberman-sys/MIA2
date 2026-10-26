@@ -3,7 +3,7 @@
 
 // Feedback goes by email through FormSubmit (formsubmit.co): free, no account for anyone, attachments up to 10 MB.
 // FORM_ID is the random alias FormSubmit hands out once the address is confirmed, so the address stays out of the code.
-const FORM_ID = '';
+const FORM_ID = 'dcd648970343d13fb7c1b7a134134b29';
 const MAX_BYTES = 10 * 1024 * 1024;
 
 const $ = id => document.getElementById(id);
