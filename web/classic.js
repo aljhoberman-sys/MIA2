@@ -704,6 +704,16 @@ function sessionData(audioName, curves = true) {
   };
 }
 
+/* Save session downloads a new file each time (an export); it never overwrites the file a session came from.
+   To tell whether anything has changed since the last save or open, the session's contents without the
+   curves are compared with what they were then. */
+let savedPrint = null;
+const fingerprint = () => {
+  const d = sessionData(null, false);
+  return JSON.stringify({ ...d, sessionId: 0, savedAt: 0, pieces: d.pieces.map(({ curve, ...p }) => p) });
+};
+const unsaved = () => (S.pieces.length || S.pending.length) > 0 && fingerprint() !== savedPrint;
+
 async function saveSession(withAudio) {
   if (S.pending.some(q => !q.piece)) { status('Add the remaining audio files before saving.'); return; }
   if (!S.pieces.length) { status('Nothing to save yet.'); return; }
@@ -732,6 +742,7 @@ async function saveSession(withAudio) {
   const stamp = 'mia-session-' + new Date().toISOString().slice(0, 10);
   if (!withAudio) {
     download(json, stamp + '.json');
+    savedPrint = fingerprint();
     status('Session saved. It holds the chart, order, titles, colors and notes, but not the audio.'
       + (remembered ? ' This browser also remembered where ' + remembered + ' of the files are.' : ''));
     return;
@@ -746,6 +757,7 @@ async function saveSession(withAudio) {
   }
   if (zip.size >= 0xFFFFFFFF) { status('That’s more than 4 GB of audio, too much for one session file.'); return; }
   download(zip, stamp + '.zip');
+  savedPrint = fingerprint();
   status('Session saved with its audio (' + Math.round(zip.size / 1e6) + ' MB). Open it on any computer to get everything back, playback included.');
 }
 
@@ -851,7 +863,7 @@ async function openSession(file) {
     status('That doesn’t look like a MIA 2 session file.');
     return;
   }
-  if (S.pieces.length && !confirm('Replace the current program with this session?')) return;
+  if (unsaved() && !confirm('Replace the current program with this session? Its changes haven’t been saved to a session file.')) return;
   await loadSession(data, bundle);
 }
 
@@ -877,6 +889,7 @@ async function loadSession(data, bundle) {
   S.scaleMode = st.scale === 'own' ? 'own' : 'program'; S.dB = !!st.dB;
   showSmooth(); $('scale').value = S.scaleMode; $('ydb').value = S.dB ? 'db' : 'lin';
   S.sessionId = data.sessionId || null;
+  savedPrint = fingerprint();
   S.playhead = 0; layout(); recompute(); fit(); updateTime(); refreshStatus();
   if (bundle) {
     const files = [];
@@ -895,7 +908,7 @@ async function loadSession(data, bundle) {
 
 /* The program is copied into this browser's own storage as it changes, audio included, so reloading
    the page or reopening a closed tab brings it back. It never leaves the computer. */
-let autoSig = null, autoBusy = false, autoAt = -1, autoReady = false, roomWarned = false;
+let autoSig = null, autoSaved, autoBusy = false, autoAt = -1, autoReady = false, roomWarned = false;
 const audioKey = p => p.src && 'audio:' + p.id + ':' + p.file + ':' + p.src.size + ':' + (p.src.lastModified || 0);
 
 async function autosave() {
@@ -905,7 +918,7 @@ async function autosave() {
   // a cheap fingerprint without the curves; the full copy is written only when it changes
   const sig = empty ? '' : JSON.stringify({ ...sessionData(audioKey, false), savedAt: 0 });
   const at = Math.round(S.playhead);
-  if (sig === autoSig && at === autoAt) return;
+  if (sig === autoSig && at === autoAt && savedPrint === autoSaved) return;
   autoBusy = true;
   try {
     if (sig !== autoSig) {
@@ -931,13 +944,20 @@ async function autosave() {
     }
     if (!empty && at !== autoAt) await idbPut('playhead', S.playhead, 'autosave');
     autoAt = at;
+    // what was last saved to a file, so New still knows after a reload whether anything is unsaved
+    if (!empty && savedPrint !== autoSaved) await idbPut('saved', savedPrint, 'autosave');
+    autoSaved = savedPrint;
   } catch (e) { /* storage unavailable: the page works as before, without the refresh copy */ }
   autoBusy = false;
 }
 
 async function restore() {
-  let data = null, playhead = 0;
-  try { data = await idbGet('session', 'autosave'); playhead = await idbGet('playhead', 'autosave') || 0; } catch (e) { /* none kept */ }
+  let data = null, playhead = 0, saved = null;
+  try {
+    data = await idbGet('session', 'autosave');
+    playhead = await idbGet('playhead', 'autosave') || 0;
+    saved = await idbGet('saved', 'autosave');
+  } catch (e) { /* none kept */ }
   if (data && Array.isArray(data.pieces) && data.pieces.length && !S.pieces.length && !S.pending.length) {
     const bundle = new Map();
     for (const p of data.pieces) {
@@ -952,6 +972,7 @@ async function restore() {
       } catch (e) { /* that copy is gone */ }
     }
     await loadSession(data, bundle);
+    savedPrint = saved == null ? null : saved;
     S.playhead = cl(+playhead || 0, 0, S.total);
     updateTime(); redraw();
     status('Your session is back as it was before the page reloaded.' + (S.pending.length ? ' Some audio needs finding again.' : ' Use Save session to keep it in a file.'));
@@ -961,9 +982,9 @@ async function restore() {
 }
 
 function newSession() {
-  if ((S.pieces.length || S.pending.length) && !confirm('Clear the chart and start a new program? Anything not saved as a session file will be lost.')) return;
+  if (unsaved() && !confirm('Clear the chart and start a new program? It has changes that haven’t been saved to a session file.')) return;
   if (S.playing) pause();
-  S.pieces = []; S.pending = []; S.notes = []; S.undo = null; S.sessionId = null; S.playhead = 0;
+  S.pieces = []; S.pending = []; S.notes = []; S.undo = null; S.sessionId = null; S.playhead = 0; savedPrint = null;
   $('undo').hidden = true; closePops();
   layout(); recompute(); fit(); updateTime(); refreshStatus();
   autosave();
