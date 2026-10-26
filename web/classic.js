@@ -6,6 +6,7 @@ const PALETTE = ['#534AB7', '#0F6E56', '#D85A30', '#185FA5', '#BA7517', '#993556
 const HOP = 0.01;                 // seconds per envelope point
 const RULER_H = 26, HEAD_H = 26, FOOT_H = 8;
 const NOTE_H = 20, NOTE_MAX_W = 220, NOTE_CHARS = 32;   // a note's compact label over the curve
+const LANE_ROW = NOTE_H + 4;      // one row of the strip under the chart for notes put there
 const TOP_FRAC = 0.92;            // tallest point sits at this fraction of the plot height
 const MAX_PX = 120;               // most zoomed-in: pixels per second
 const H = 340, MH = 78;
@@ -26,6 +27,7 @@ const mini = $('mini'), m = mini.getContext('2d');
 let W = 0, dpr = 1, atFit = true, drag = null, nextId = 1;
 let audio = null, sources = [], t0 = 0, c0 = 0, raf = 0, drawQueued = false;
 let editingNote = null, editingPiece = null;
+let plot = { top: 0, bottom: H, plotH: H };   // the chart's plot area, as last drawn
 
 const cl = (v, a, b) => Math.min(b, Math.max(a, v));
 const timeToX = t => (t - S.scroll) * S.pxPerSec;
@@ -214,11 +216,14 @@ function rulerStep() {
 function draw() {
   drawQueued = false;
   if (!W) return;
+  if (annotKey() !== annotShown) fillAnnotPieces();
   const T = { bg: css('--panel'), fg: css('--fg'), muted: css('--muted'), line: css('--line'), soft: css('--soft'), accent: css('--accent') };
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.fillStyle = T.bg; g.fillRect(0, 0, W, H);
-  const top = RULER_H + HEAD_H + 6, bottom = H - FOOT_H, plotH = bottom - top;
   g.font = '12px -apple-system, "Segoe UI", Roboto, sans-serif';
+  const rows = laneRows(), laneH = rows ? rows * LANE_ROW + 6 : 0;
+  const top = RULER_H + HEAD_H + 6, bottom = H - FOOT_H - laneH, plotH = bottom - top;
+  plot = { top, bottom, plotH };
 
   if (!S.pieces.length) {
     g.fillStyle = T.muted; g.textAlign = 'center'; g.font = '15px -apple-system, "Segoe UI", Roboto, sans-serif';
@@ -316,8 +321,27 @@ function noteLabel(text) {
   return first.length > NOTE_CHARS ? first.slice(0, NOTE_CHARS - 1).trimEnd() + '…' : first + (first.length < t.length ? ' …' : '');
 }
 
+const noteWidth = n => Math.min(NOTE_MAX_W, g.measureText(noteLabel(n.text)).width + 20);
+const noteX = (n, p) => Math.round(timeToX(p.start + n.offset));
+
+// rows of the strip under the chart: each note put there takes the first row it fits in
+function laneRows() {
+  const rowEnds = [];
+  for (const n of S.notes) n.row = null;
+  const lane = S.notes.map(n => ({ n, p: byId(n.pieceId) })).filter(o => o.p && o.n.place === 'bottom')
+    .map(o => ({ n: o.n, x: noteX(o.n, o.p) })).sort((a, b) => a.x - b.x);
+  for (const { n, x } of lane) {
+    const lx = cl(x - 8, 2, Math.max(2, W - noteWidth(n) - 2));
+    let r = rowEnds.findIndex(end => lx > end + 4);
+    if (r < 0 || r > 2) r = rowEnds.length < 3 ? rowEnds.length : rowEnds.indexOf(Math.min(...rowEnds));
+    rowEnds[r] = lx + noteWidth(n); n.row = r;
+  }
+  return rowEnds.length;
+}
+
 /* Notes float just above the curve at their time, joined to it by a short stem. Where labels
-   would overlap, later ones step up (or, with no room above, down) until they are clear. */
+   would overlap, later ones step up (or, with no room above, down) until they are clear.
+   A note can also sit where it was dragged to, or in the strip under the chart. */
 function drawNotes(T, top, bottom, plotH) {
   const minY = RULER_H + HEAD_H + 4, maxY = bottom - NOTE_H - 2, placed = [];
   g.font = '12px -apple-system, "Segoe UI", Roboto, sans-serif'; g.textBaseline = 'middle';
@@ -326,31 +350,46 @@ function drawNotes(T, top, bottom, plotH) {
     const p = byId(n.pieceId);
     n.box = null;
     if (!p || !p.sm) continue;
-    const x = Math.round(timeToX(p.start + n.offset));
-    if (x < -NOTE_MAX_W || x > W + 10) continue;
+    const x = noteX(n, p);
+    const lxFree = n.place === 'free' ? timeToX(p.start + n.offset + n.dt) : x;
+    if (Math.max(x, lxFree) < -NOTE_MAX_W || Math.min(x, lxFree) > W + 10) continue;
     shown.push({ n, p, x });
   }
-  shown.sort((a, b) => a.x - b.x);
+  // notes with a set place go first, so the floating ones keep clear of them
+  const rank = n => (n.place === 'bottom' || n.place === 'free' ? 0 : 1);
+  shown.sort((a, b) => rank(a.n) - rank(b.n) || a.x - b.x);
   for (const { n, p, x } of shown) {
-    const label = noteLabel(n.text), w = Math.min(NOTE_MAX_W, g.measureText(label).width + 20), h = NOTE_H;
-    const lx = cl(x - 8, 2, Math.max(2, W - w - 2));
+    const label = noteLabel(n.text), w = noteWidth(n), h = NOTE_H;
     const cy = x >= 0 && x < W ? curveY(p, x, top, plotH) : bottom;
-    const hits = y => placed.find(q => lx < q.x + q.w + 4 && lx + w + 4 > q.x && y < q.y + q.h + 3 && y + h + 3 > q.y);
-    const want = cl(cy - 12 - h, minY, maxY);
-    let y = want, q;
-    while ((q = hits(y)) && q.y - h - 3 >= minY) y = q.y - h - 3;
-    if (hits(y)) { y = want; while ((q = hits(y)) && q.y + q.h + 3 <= maxY) y = q.y + q.h + 3; }
+    let lx = cl(x - 8, 2, Math.max(2, W - w - 2)), y;
+    if (n.place === 'bottom') {
+      y = bottom + 4 + n.row * LANE_ROW;
+    } else if (n.place === 'free') {
+      lx = cl(Math.round(timeToX(p.start + n.offset + n.dt)), 2, Math.max(2, W - w - 2));
+      y = cl(top + n.fy * (plotH - h), minY, maxY);
+    } else {
+      const hits = y => placed.find(q => lx < q.x + q.w + 4 && lx + w + 4 > q.x && y < q.y + q.h + 3 && y + h + 3 > q.y);
+      const want = cl(cy - 12 - h, minY, maxY);
+      let q;
+      y = want;
+      while ((q = hits(y)) && q.y - h - 3 >= minY) y = q.y - h - 3;
+      if (hits(y)) { y = want; while ((q = hits(y)) && q.y + q.h + 3 <= maxY) y = q.y + q.h + 3; }
+    }
     const box = { x: lx, y, w, h };
     placed.push(box); n.box = box;
 
-    // stem from the label to the curve
-    const active = n === editingNote;
-    if (x >= 0 && x <= W && (y + h < cy - 2 || y > cy + 2)) {
-      g.strokeStyle = p.color; g.globalAlpha = 0.7; g.lineWidth = 1;
-      g.beginPath(); g.moveTo(x + 0.5, y + h < cy ? y + h : y); g.lineTo(x + 0.5, cy); g.stroke();
-      g.globalAlpha = 1;
+    // stem from the curve to the nearest point of the label
+    const active = n === editingNote || (drag && drag.type === 'note' && drag.n === n);
+    if (x >= 0 && x <= W) {
+      const sx = cl(x + 0.5, lx, lx + w), sy = cl(cy, y, y + h);
+      if (Math.hypot(sx - x, sy - cy) > 3) {
+        g.strokeStyle = p.color; g.globalAlpha = 0.7; g.lineWidth = 1;
+        if (n.place === 'bottom') g.setLineDash([2, 3]);
+        g.beginPath(); g.moveTo(x + 0.5, cy); g.lineTo(sx, sy); g.stroke();
+        g.setLineDash([]); g.globalAlpha = 1;
+      }
+      g.fillStyle = p.color; g.beginPath(); g.arc(x + 0.5, cy, 2.5, 0, Math.PI * 2); g.fill();
     }
-    if (x >= 0 && x <= W) { g.fillStyle = p.color; g.beginPath(); g.arc(x + 0.5, cy, 2.5, 0, Math.PI * 2); g.fill(); }
     g.fillStyle = T.bg; g.globalAlpha = 0.94;
     g.beginPath(); g.roundRect(lx, y, w, h, 4); g.fill(); g.globalAlpha = 1;
     g.strokeStyle = active ? T.accent : p.color; g.lineWidth = active ? 2 : 1;
@@ -544,7 +583,7 @@ async function addFiles(files, index) {
         id, file: f.name, handle: handleOf.get(f) || null, title: pend ? pend.title : f.name.replace(/\.[^.]+$/, ''),
         color: pend ? pend.color : PALETTE[(id - 1) % PALETTE.length],
         buffer, src: f, dur: buffer.duration, env: envelope(buffer), sm: null, peak: 1, start: 0,
-        sessionIdx: pend ? pend.sessionIdx : undefined,
+        sessionIdx: pend ? pend.sessionIdx : undefined, annot: pend ? pend.annot : {},
       };
       if (S.playing) pause();
       if (pend) {
@@ -718,7 +757,7 @@ function showSaveSize() {
   $('saveSize').textContent = !S.pieces.length ? 'Nothing to save yet.'
     : missing ? 'The audio can’t be included until ' + (missing === 1 ? '1 missing file is' : missing + ' missing files are') + ' added. The session alone is about ' + mb(curves) + '.'
     : $('withAudio').checked ? 'Saves one .zip of about ' + mb(curves + audio) + ', with the audio inside. It opens complete on any computer.'
-    : 'Saves the chart, titles, colors and notes, about ' + mb(curves) + '. Including the audio would make it about ' + mb(curves + audio) + '.';
+    : 'Saves the chart, titles, colors, notes and annotations, about ' + mb(curves) + '. Including the audio would make it about ' + mb(curves + audio) + '.';
 }
 function openSave() {
   showSaveSize();
@@ -758,14 +797,19 @@ async function saveSession(withAudio) {
       id: p.id, file: p.file, title: p.title, color: p.color, dur: +p.dur.toFixed(3),
       curve: { hop: HOP, weighting: 'A', encoding: 'f32-base64', data: curveToText(p.env) },
       ...(withAudio ? { audio: audioName(p) } : {}),
+      ...(hasAnnot(p) ? { annotations: Object.fromEntries(ANNOT_KEYS.filter(k => p.annot[k]).map(k => [k, p.annot[k]])) } : {}),
     })),
-    notes: S.notes.filter(n => byId(n.pieceId)).map(n => ({ pieceId: n.pieceId, offset: +n.offset.toFixed(3), text: n.text })),
+    notes: S.notes.filter(n => byId(n.pieceId)).map(n => ({
+      pieceId: n.pieceId, offset: +n.offset.toFixed(3), text: n.text,
+      ...(n.place === 'bottom' || n.place === 'free' ? { place: n.place } : {}),
+      ...(n.dt != null ? { dt: +n.dt.toFixed(3), fy: +n.fy.toFixed(4) } : {}),
+    })),
   };
   const json = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   const stamp = 'mia-session-' + new Date().toISOString().slice(0, 10);
   if (!withAudio) {
     download(json, stamp + '.json');
-    status('Session saved. It holds the chart, order, titles, colors and notes, but not the audio.'
+    status('Session saved. It holds the chart, order, titles, colors, notes and annotations, but not the audio.'
       + (remembered ? ' This browser also remembered where ' + remembered + ' of the files are.' : ''));
     return;
   }
@@ -885,19 +929,26 @@ async function openSession(file) {
     return;
   }
   if (S.pieces.length && !confirm('Replace the current program with this session?')) return;
+  annotPiece = null;
   if (S.playing) pause();
   S.pieces = []; S.notes = []; S.undo = null; $('undo').hidden = true;
-  S.pending = data.pieces.map((p, i) => ({ id: p.id, file: p.file, title: p.title, color: p.color, dur: p.dur, sessionIdx: i }));
+  S.pending = data.pieces.map((p, i) => ({ id: p.id, file: p.file, title: p.title, color: p.color, dur: p.dur, sessionIdx: i,
+    annot: readAnnot(p.annotations) }));
   // sessions saved with curves draw at once; older ones (and unreadable curves) wait for their audio as before
   S.pending.forEach((q, i) => {
     const env = savedCurve(data.pieces[i].curve);
     if (!env) return;
     q.piece = { id: q.id, file: q.file, handle: null, title: q.title, color: q.color, buffer: null,
-      dur: +q.dur || env.length * HOP, env, sm: null, peak: 1, start: 0, sessionIdx: i };
+      dur: +q.dur || env.length * HOP, env, sm: null, peak: 1, start: 0, sessionIdx: i, annot: q.annot };
     S.pieces.push(q.piece);
   });
   nextId = Math.max(nextId, ...data.pieces.map(p => p.id)) + 1;
-  S.notes = (data.notes || []).map(n => ({ id: nextId++, pieceId: n.pieceId, offset: n.offset, text: n.text, box: null }));
+  S.notes = (data.notes || []).map(n => ({
+    id: nextId++, pieceId: n.pieceId, offset: n.offset, text: n.text,
+    place: n.place === 'bottom' || n.place === 'free' ? n.place : 'curve',
+    ...(isFinite(n.dt) && isFinite(n.fy) ? { dt: +n.dt, fy: cl(+n.fy, 0, 1) } : n.place === 'free' ? { dt: 0, fy: 0 } : {}),
+    box: null,
+  }));
   const st = data.settings || {};
   // sessions saved before smoothSec existed used a 0.05..3 s slider
   S.smoothSec = roundSec(st.smoothSec ? +st.smoothSec
@@ -941,11 +992,19 @@ function openNote(n) {
   const p = byId(n.pieceId), pop = $('notePop');
   $('nText').value = n.text;
   $('nWhen').textContent = fmt(p.start + n.offset) + '  ·  ' + p.title;
+  showPlace(n);
   draw();                                     // places the label, so the box can sit next to it
   pop.hidden = false;
   const b = n.box || { x: timeToX(p.start + n.offset), y: RULER_H + HEAD_H + 6, h: 0 }, ph = pop.offsetHeight;
   place(pop, b.x, b.y + b.h + 6 + ph <= H + MH ? b.y + b.h + 6 : Math.max(4, b.y - ph - 6));
   setTimeout(() => $('nText').focus(), 0);   // the pointer release would otherwise take focus back
+}
+
+// the Show menu; "Where I dragged it" is offered once a note has been dragged somewhere
+function showPlace(n) {
+  const free = $('nPlace').querySelector('[value=free]');
+  free.hidden = free.disabled = n.place !== 'free' && n.dt == null;
+  $('nPlace').value = n.place || 'curve';
 }
 
 function closePops() {
@@ -958,9 +1017,90 @@ function closePops() {
 function addNote(t) {
   const p = pieceAt(t);
   if (!p) return;
-  const n = { id: nextId++, pieceId: p.id, offset: cl(t - p.start, 0, p.dur), text: '', box: null };
+  const n = { id: nextId++, pieceId: p.id, offset: cl(t - p.start, 0, p.dur), text: '', place: 'curve', box: null };
   S.notes.push(n);
   openNote(n);
+}
+
+/* ---------- annotations ---------- */
+
+/* A full description of each piece under the fixed headings of MIA 1's summary, worded as in
+   Bonde, "Models and techniques for understanding the GIM music programs" (in Grocke, 2019). */
+const ANNOT = [
+  { head: 'SELECTION', fields: [['composer', 'Composer'], ['composition', 'Composition']] },
+  { head: 'MUSIC ELEMENTS', fields: [
+    ['texture', 'Texture (melody, harmony)'],
+    ['tension', 'Tension/Release (dynamics, amplitude)'],
+    ['movement', 'Movement (tempo, rhythm, direction)'],
+    ['structure', 'Structure (style, form, simple, complex)'],
+    ['tonal', 'Tonal (timbre, vocal, volume)'],
+    ['pitch', 'Pitch (high, low, intervals)'],
+    ['symbolic', 'Symbolic (images, memory)'],
+    ['mood', 'Mood (emotion, energy)'],
+    ['intent', 'Composer’s Intent'],
+  ] },
+];
+const ANNOT_KEYS = ANNOT.flatMap(s => s.fields.map(f => f[0]));
+const hasAnnot = p => !!p.annot && ANNOT_KEYS.some(k => p.annot[k] && p.annot[k].trim());
+const readAnnot = a => Object.fromEntries(ANNOT_KEYS.filter(k => a && typeof a[k] === 'string').map(k => [k, a[k]]));
+let annotPiece = null, annotShown = '';
+
+// the form is built once; its boxes show whichever piece is picked above them
+(() => {
+  const form = $('aForm');
+  for (const sec of ANNOT) {
+    const h = document.createElement('div');
+    h.className = 'annot-sec'; h.textContent = sec.head; form.append(h);
+    for (const [key, label] of sec.fields) {
+      const row = document.createElement('div'), l = document.createElement('label'), t = document.createElement('textarea');
+      row.className = 'annot-row'; t.id = 'a-' + key; t.rows = 1; l.htmlFor = t.id; l.textContent = label;
+      t.oninput = () => { const p = byId(annotPiece); if (p) p.annot[key] = t.value; growBox(t); };
+      row.append(l, t); form.append(row);
+    }
+  }
+})();
+function growBox(t) { t.style.height = 'auto'; t.style.height = t.scrollHeight + 2 + 'px'; }
+
+// the piece menu follows the program's order and titles
+const annotKey = () => S.pieces.map(p => p.id + ':' + p.title).join('|');
+function fillAnnotPieces() {
+  annotShown = annotKey();
+  const sel = $('aPiece');
+  sel.replaceChildren(...S.pieces.map((p, i) => new Option((i + 1) + '. ' + p.title, p.id)));
+  if (!byId(annotPiece)) annotPiece = S.pieces.length ? pieceAt(S.playhead).id : null;
+  sel.value = annotPiece == null ? '' : annotPiece;
+  showAnnot();
+}
+function showAnnot() {
+  const p = byId(annotPiece);
+  for (const key of ANNOT_KEYS) {
+    const t = $('a-' + key);
+    t.value = p ? p.annot[key] || '' : ''; t.disabled = !p;
+    if (!$('annotPanel').hidden) growBox(t);
+  }
+  $('a-composition').placeholder = p ? p.title : '';
+}
+
+// printing adds every annotated piece's description under the chart
+function fillAnnotPrint() {
+  const out = $('annotPrint');
+  out.replaceChildren();
+  for (const p of S.pieces.filter(hasAnnot)) {
+    const sec = document.createElement('section'), h = document.createElement('h2');
+    h.textContent = p.title; sec.append(h);
+    for (const part of ANNOT) {
+      const filled = part.fields.filter(([k]) => p.annot[k] && p.annot[k].trim());
+      if (!filled.length) continue;
+      const h3 = document.createElement('h3'), dl = document.createElement('dl');
+      h3.textContent = part.head;
+      for (const [k, label] of filled) {
+        const dt = document.createElement('dt'), dd = document.createElement('dd');
+        dt.textContent = label; dd.textContent = p.annot[k].trim(); dl.append(dt, dd);
+      }
+      sec.append(h3, dl);
+    }
+    out.append(sec);
+  }
 }
 
 /* ---------- pointer input ---------- */
@@ -968,6 +1108,22 @@ function addNote(t) {
 function pos(e) {
   const r = canvas.getBoundingClientRect();
   return { x: e.clientX - r.left, y: e.clientY - r.top };
+}
+
+/* Dragging a note puts its label where it is dropped, kept in time and height so it stays put
+   through zooming. Dropped below the baseline, it goes to the strip under the chart. */
+function moveNote(d, x, y) {
+  const n = d.n, p = byId(n.pieceId);
+  if (!p) return;
+  if (editingNote === n) { $('notePop').hidden = true; editingNote = null; }
+  if (y > plot.bottom + 2) n.place = 'bottom';
+  else {
+    const lx = d.bx + (x - d.x0), ly = d.by + (y - d.y0);
+    n.place = 'free';
+    n.dt = xToTime(lx) - (p.start + n.offset);
+    n.fy = cl((ly - plot.top) / Math.max(1, plot.plotH - NOTE_H), 0, 1);
+  }
+  redraw();
 }
 
 function noteAt(x, y) {
@@ -988,7 +1144,7 @@ canvas.addEventListener('pointerdown', e => {
     return;
   }
   const nb = noteAt(x, y);
-  if (nb) { openNote(nb); return; }
+  if (nb) { drag = { type: 'note', n: nb, x0: x, y0: y, bx: nb.box.x, by: nb.box.y, moved: false }; return; }
   if (S.notesMode) { addNote(t); return; }
   if (editingNote) closePops();             // clicking away from an open note closes it
   drag = { type: 'pan', x0: x, scroll0: S.scroll, moved: false };
@@ -997,10 +1153,14 @@ canvas.addEventListener('pointerdown', e => {
 canvas.addEventListener('pointermove', e => {
   const { x, y } = pos(e);
   if (!drag) {
-    canvas.style.cursor = y < RULER_H ? 'col-resize' : y < RULER_H + HEAD_H ? 'grab' : S.notesMode ? 'crosshair' : noteAt(x, y) ? 'pointer' : 'default';
+    canvas.style.cursor = y < RULER_H ? 'col-resize' : y < RULER_H + HEAD_H ? 'grab' : noteAt(x, y) ? 'pointer' : S.notesMode ? 'crosshair' : 'default';
     return;
   }
   if (drag.type === 'scrub') seek(xToTime(x));
+  else if (drag.type === 'note') {
+    if (Math.hypot(x - drag.x0, y - drag.y0) > 4) drag.moved = true;
+    if (drag.moved) { canvas.style.cursor = 'grabbing'; moveNote(drag, x, y); }
+  }
   else if (drag.type === 'piece') {
     if (Math.abs(x - drag.x0) > 3) drag.moved = true;
     if (drag.moved) { canvas.style.cursor = 'grabbing'; reorder(drag.p, xToTime(x) - drag.grab + drag.p.dur / 2); }
@@ -1012,6 +1172,7 @@ canvas.addEventListener('pointermove', e => {
 
 const endDrag = e => {
   if (drag && drag.type === 'pan' && !drag.moved) seek(xToTime(pos(e).x));
+  if (drag && drag.type === 'note' && !drag.moved) { const n = drag.n; drag = null; openNote(n); return; }
   drag = null; redraw();
 };
 canvas.addEventListener('pointerup', endDrag);
@@ -1087,7 +1248,7 @@ $('file').onchange = e => { addFiles([...e.target.files]); e.target.value = ''; 
 $('play').onclick = () => (S.playing ? pause() : play());
 $('stop').onclick = stop;
 $('fit').onclick = fit;
-showSmooth(); $('scale').value = S.scaleMode;
+showSmooth(); $('scale').value = S.scaleMode; showAnnot();
 $('smooth').oninput = e => { S.smoothSec = roundSec(smoothSec(+e.target.value)); $('smoothNum').value = S.smoothSec.toFixed(1); recompute(); redraw(); };
 $('smoothNum').onchange = e => {
   const v = parseFloat(e.target.value);
@@ -1108,6 +1269,14 @@ $('notes').onclick = e => {
   e.currentTarget.setAttribute('aria-pressed', String(S.notesMode));
   status(S.notesMode ? 'Notes mode: click the chart to add a note. Click a note to read or edit it.' : '');
 };
+$('annot').onclick = e => {
+  const open = $('annotPanel').hidden;
+  $('annotPanel').hidden = !open;
+  e.currentTarget.setAttribute('aria-pressed', String(open));
+  if (open) { annotPiece = S.pieces.length ? pieceAt(S.playhead).id : null; fillAnnotPieces(); }
+};
+$('aPiece').onchange = e => { annotPiece = +e.target.value; showAnnot(); };
+window.addEventListener('beforeprint', fillAnnotPrint);
 $('scale').onchange = e => { S.scaleMode = e.target.value; redraw(); };
 $('ydb').onchange = e => { S.dB = e.target.value === 'db'; redraw(); };
 $('print').onclick = () => window.print();
@@ -1136,6 +1305,13 @@ $('nText').onkeydown = e => { if (e.key === 'Escape' || (e.key === 'Enter' && (e
 $('pTitle').onkeydown = e => { if (e.key === 'Enter' || e.key === 'Escape') closePops(); };
 $('nDelete').onclick = () => { S.notes = S.notes.filter(n => n !== editingNote); editingNote = null; closePops(); };
 $('nDone').onclick = closePops;
+$('nPlace').onchange = e => {
+  const n = editingNote;
+  if (!n) return;
+  n.place = e.target.value;
+  if (n.place === 'free' && n.dt == null) { n.dt = 0; n.fy = 0; }
+  openNote(n);                                // the label has moved, so the box follows it
+};
 
 window.addEventListener('dragover', e => e.preventDefault());
 window.addEventListener('drop', async e => {
