@@ -4,7 +4,8 @@
 const $ = id => document.getElementById(id);
 const PALETTE = ['#534AB7', '#0F6E56', '#D85A30', '#185FA5', '#BA7517', '#993556'];
 const HOP = 0.01;                 // seconds per envelope point
-const RULER_H = 26, HEAD_H = 26, NOTES_H = 32;
+const RULER_H = 26, HEAD_H = 26, FOOT_H = 8;
+const NOTE_H = 20, NOTE_MAX_W = 220, NOTE_CHARS = 32;   // a note's compact label over the curve
 const TOP_FRAC = 0.92;            // tallest point sits at this fraction of the plot height
 const MAX_PX = 120;               // most zoomed-in: pixels per second
 const H = 340, MH = 78;
@@ -216,7 +217,7 @@ function draw() {
   const T = { bg: css('--panel'), fg: css('--fg'), muted: css('--muted'), line: css('--line'), soft: css('--soft'), accent: css('--accent') };
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.fillStyle = T.bg; g.fillRect(0, 0, W, H);
-  const top = RULER_H + HEAD_H + 6, bottom = H - NOTES_H, plotH = bottom - top;
+  const top = RULER_H + HEAD_H + 6, bottom = H - FOOT_H, plotH = bottom - top;
   g.font = '12px -apple-system, "Segoe UI", Roboto, sans-serif';
 
   if (!S.pieces.length) {
@@ -285,25 +286,7 @@ function draw() {
     }
   }
 
-  // notes
-  const laneTop = bottom + 2;
-  g.font = '12px -apple-system, "Segoe UI", Roboto, sans-serif';
-  for (const n of S.notes) {
-    const p = byId(n.pieceId);
-    if (!p) { n.box = null; continue; }
-    const x = timeToX(p.start + n.offset);
-    const label = n.text ? (n.text.length > 30 ? n.text.slice(0, 29) + '…' : n.text) : '…';
-    const w = g.measureText(label).width + 22;
-    if (x < -w || x > W + 10) { n.box = null; continue; }
-    g.strokeStyle = T.muted; g.globalAlpha = 0.5; g.setLineDash([2, 4]);
-    g.beginPath(); g.moveTo(x + 0.5, top); g.lineTo(x + 0.5, laneTop); g.stroke();
-    g.setLineDash([]); g.globalAlpha = 1;
-    g.fillStyle = T.soft; g.strokeStyle = T.line;
-    g.beginPath(); g.roundRect(x, laneTop + 2, w, NOTES_H - 8, 4); g.fill(); g.stroke();
-    g.fillStyle = p.color; g.fillRect(x, laneTop + 2, 4, NOTES_H - 8);
-    g.fillStyle = T.fg; g.fillText(label, x + 12, laneTop + NOTES_H / 2 - 1);
-    n.box = { x, y: laneTop + 2, w, h: NOTES_H - 8 };
-  }
+  drawNotes(T, top, bottom, plotH);
 
   // playhead
   if (playX >= -1 && playX <= W + 1) {
@@ -313,6 +296,71 @@ function draw() {
     g.beginPath(); g.moveTo(playX - 6, 2); g.lineTo(playX + 6, 2); g.lineTo(playX, 12); g.closePath(); g.fill();
   }
   drawMini(T);
+}
+
+// height of the drawn contour at screen column x, matching buildPath
+function curveY(p, x, top, h) {
+  const src = p.sm, n = src.length;
+  const i0 = cl(Math.floor((xToTime(x) - p.start) / HOP), 0, n - 1);
+  const i1 = cl(Math.ceil((xToTime(x + 1) - p.start) / HOP), i0, n - 1);
+  let mx = 0;
+  for (let i = i0; i <= i1; i++) if (src[i] > mx) mx = src[i];
+  return top + h - yval(p, mx) * h * TOP_FRAC;
+}
+
+// a note's label: its first line, shortened; the full text opens on click
+function noteLabel(text) {
+  const t = (text || '').trim();
+  if (!t) return '…';
+  const first = t.split('\n')[0].trim();
+  return first.length > NOTE_CHARS ? first.slice(0, NOTE_CHARS - 1).trimEnd() + '…' : first + (first.length < t.length ? ' …' : '');
+}
+
+/* Notes float just above the curve at their time, joined to it by a short stem. Where labels
+   would overlap, later ones step up (or, with no room above, down) until they are clear. */
+function drawNotes(T, top, bottom, plotH) {
+  const minY = RULER_H + HEAD_H + 4, maxY = bottom - NOTE_H - 2, placed = [];
+  g.font = '12px -apple-system, "Segoe UI", Roboto, sans-serif'; g.textBaseline = 'middle';
+  const shown = [];
+  for (const n of S.notes) {
+    const p = byId(n.pieceId);
+    n.box = null;
+    if (!p || !p.sm) continue;
+    const x = Math.round(timeToX(p.start + n.offset));
+    if (x < -NOTE_MAX_W || x > W + 10) continue;
+    shown.push({ n, p, x });
+  }
+  shown.sort((a, b) => a.x - b.x);
+  for (const { n, p, x } of shown) {
+    const label = noteLabel(n.text), w = Math.min(NOTE_MAX_W, g.measureText(label).width + 20), h = NOTE_H;
+    const lx = cl(x - 8, 2, Math.max(2, W - w - 2));
+    const cy = x >= 0 && x < W ? curveY(p, x, top, plotH) : bottom;
+    const hits = y => placed.find(q => lx < q.x + q.w + 4 && lx + w + 4 > q.x && y < q.y + q.h + 3 && y + h + 3 > q.y);
+    const want = cl(cy - 12 - h, minY, maxY);
+    let y = want, q;
+    while ((q = hits(y)) && q.y - h - 3 >= minY) y = q.y - h - 3;
+    if (hits(y)) { y = want; while ((q = hits(y)) && q.y + q.h + 3 <= maxY) y = q.y + q.h + 3; }
+    const box = { x: lx, y, w, h };
+    placed.push(box); n.box = box;
+
+    // stem from the label to the curve
+    const active = n === editingNote;
+    if (x >= 0 && x <= W && (y + h < cy - 2 || y > cy + 2)) {
+      g.strokeStyle = p.color; g.globalAlpha = 0.7; g.lineWidth = 1;
+      g.beginPath(); g.moveTo(x + 0.5, y + h < cy ? y + h : y); g.lineTo(x + 0.5, cy); g.stroke();
+      g.globalAlpha = 1;
+    }
+    if (x >= 0 && x <= W) { g.fillStyle = p.color; g.beginPath(); g.arc(x + 0.5, cy, 2.5, 0, Math.PI * 2); g.fill(); }
+    g.fillStyle = T.bg; g.globalAlpha = 0.94;
+    g.beginPath(); g.roundRect(lx, y, w, h, 4); g.fill(); g.globalAlpha = 1;
+    g.strokeStyle = active ? T.accent : p.color; g.lineWidth = active ? 2 : 1;
+    g.beginPath(); g.roundRect(lx + 0.5, y + 0.5, w - 1, h - 1, 4); g.stroke();
+    g.fillStyle = p.color; g.fillRect(lx + 1, y + 1, 3, h - 2);
+    g.save(); g.beginPath(); g.rect(lx, y, w - 6, h); g.clip();
+    g.fillStyle = T.fg; g.fillText(label, lx + 10, y + h / 2 + 0.5);
+    g.restore();
+  }
+  g.textBaseline = 'alphabetic';
 }
 
 function drawMini(T) {
@@ -886,17 +934,22 @@ function openPiece(p, x) {
   setTimeout(() => { $('pTitle').focus(); $('pTitle').select(); }, 0);
 }
 
+// the note opens full size beside its label, to read or edit at length
 function openNote(n) {
   closePops();
   editingNote = n;
+  const p = byId(n.pieceId), pop = $('notePop');
   $('nText').value = n.text;
-  const p = byId(n.pieceId), x = timeToX(p.start + n.offset);
-  place($('notePop'), x, H - NOTES_H - 92);
+  $('nWhen').textContent = fmt(p.start + n.offset) + '  ·  ' + p.title;
+  draw();                                     // places the label, so the box can sit next to it
+  pop.hidden = false;
+  const b = n.box || { x: timeToX(p.start + n.offset), y: RULER_H + HEAD_H + 6, h: 0 }, ph = pop.offsetHeight;
+  place(pop, b.x, b.y + b.h + 6 + ph <= H + MH ? b.y + b.h + 6 : Math.max(4, b.y - ph - 6));
   setTimeout(() => $('nText').focus(), 0);   // the pointer release would otherwise take focus back
 }
 
 function closePops() {
-  if (editingNote && !editingNote.text) S.notes = S.notes.filter(n => n !== editingNote);
+  if (editingNote && !editingNote.text.trim()) S.notes = S.notes.filter(n => n !== editingNote);
   editingNote = null; editingPiece = null;
   $('piecePop').hidden = true; $('notePop').hidden = true;
   redraw();
@@ -907,7 +960,7 @@ function addNote(t) {
   if (!p) return;
   const n = { id: nextId++, pieceId: p.id, offset: cl(t - p.start, 0, p.dur), text: '', box: null };
   S.notes.push(n);
-  redraw(); openNote(n);
+  openNote(n);
 }
 
 /* ---------- pointer input ---------- */
@@ -937,6 +990,7 @@ canvas.addEventListener('pointerdown', e => {
   const nb = noteAt(x, y);
   if (nb) { openNote(nb); return; }
   if (S.notesMode) { addNote(t); return; }
+  if (editingNote) closePops();             // clicking away from an open note closes it
   drag = { type: 'pan', x0: x, scroll0: S.scroll, moved: false };
 });
 
@@ -1052,7 +1106,7 @@ $('zoomNum').onchange = e => {
 $('notes').onclick = e => {
   S.notesMode = !S.notesMode;
   e.currentTarget.setAttribute('aria-pressed', String(S.notesMode));
-  status(S.notesMode ? 'Notes mode: click the chart to add a note. Click a note to edit it.' : '');
+  status(S.notesMode ? 'Notes mode: click the chart to add a note. Click a note to read or edit it.' : '');
 };
 $('scale').onchange = e => { S.scaleMode = e.target.value; redraw(); };
 $('ydb').onchange = e => { S.dB = e.target.value === 'db'; redraw(); };
@@ -1077,7 +1131,8 @@ $('pColor').oninput = e => { if (editingPiece) { editingPiece.color = e.target.v
 $('pRemove').onclick = () => { const p = editingPiece; closePops(); if (p) removePiece(p); };
 $('pDone').onclick = closePops;
 $('nText').oninput = e => { if (editingNote) { editingNote.text = e.target.value; redraw(); } };
-$('nText').onkeydown = e => { if (e.key === 'Enter' || e.key === 'Escape') closePops(); };
+// Enter starts a new line; Esc or Cmd/Ctrl+Enter closes
+$('nText').onkeydown = e => { if (e.key === 'Escape' || (e.key === 'Enter' && (e.metaKey || e.ctrlKey))) closePops(); };
 $('pTitle').onkeydown = e => { if (e.key === 'Enter' || e.key === 'Escape') closePops(); };
 $('nDelete').onclick = () => { S.notes = S.notes.filter(n => n !== editingNote); editingNote = null; closePops(); };
 $('nDone').onclick = closePops;

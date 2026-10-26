@@ -68,6 +68,11 @@
   .pop .row { display: flex; gap: 8px; align-items: center; }
   .pop input[type=text] { flex: 1; min-width: 0; }
   .pop input[type=color] { width: 36px; height: 30px; padding: 0; border: 1px solid var(--line); border-radius: 6px; background: none; }
+  #notePop { width: min(380px, calc(100% - 8px)); }
+  #nWhen { font-size: 13px; color: var(--muted); }
+  #nText { font: inherit; font-size: 14px; line-height: 1.45; color: var(--fg); background: var(--panel); border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 8px; width: 100%; min-height: 140px; resize: vertical; }
+  #notePop .row { justify-content: space-between; }
   .hint { color: var(--muted); font-size: 13px; padding: 10px 2px; }
   @media print {
     body { background: #fff; color: #000; }
@@ -137,8 +142,9 @@
         <div class="row"><button id="pRemove">Remove piece</button><button id="pDone">Done</button></div>
       </div>
       <div class="pop" id="notePop" hidden>
-        <input type="text" id="nText" maxlength="120" placeholder="Note" aria-label="Note text">
-        <div class="row"><button id="nDelete">Delete</button><button id="nDone">Done</button></div>
+        <div id="nWhen"></div>
+        <textarea id="nText" placeholder="Note" aria-label="Note text"></textarea>
+        <div class="row"><button id="nDelete">Delete</button><button id="nDone" title="Done (Esc)">Done</button></div>
       </div>
     </div>
     <canvas id="mini" aria-label="Whole program mini-map"></canvas>
@@ -168,6 +174,7 @@
   <p class="hint no-print">
     Drop audio files anywhere on the page. Drag a piece's title bar to reorder. Drag the chart to scroll, drag along the ruler to set the start point,
     and pinch or Alt+scroll to zoom. Double-click a title bar to rename it or change its color, and use the × on a title bar to remove a piece.
+    With Add notes on, click the chart to place a note; notes float over the curve, and clicking one opens it full size to read or edit.
     Save session keeps the chart, your order, titles, colors and notes in a file (not the audio). Opening it shows the chart straight away;
     to play it, add the same audio files again. Tick Include the audio files to save one .zip that also holds the audio, so it opens complete on any computer.
   </p>
