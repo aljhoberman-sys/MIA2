@@ -68,6 +68,24 @@
   .pop .row { display: flex; gap: 8px; align-items: center; }
   .pop input[type=text] { flex: 1; min-width: 0; }
   .pop input[type=color] { width: 36px; height: 30px; padding: 0; border: 1px solid var(--line); border-radius: 6px; background: none; }
+  #notePop { width: min(380px, calc(100% - 8px)); }
+  #nWhen { font-size: 13px; color: var(--muted); }
+  #nText { font: inherit; font-size: 14px; line-height: 1.45; color: var(--fg); background: var(--panel); border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 8px; width: 100%; min-height: 140px; resize: vertical; }
+  #notePop .row { justify-content: space-between; }
+  #notePop select { font: inherit; font-size: 13px; }
+  #annotPanel { border-top: 1px solid var(--line); padding: 12px 14px 14px; }
+  #annotPanel[hidden] { display: none; }
+  .annot-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 10px; }
+  .annot-head .src { font-size: 13px; color: var(--muted); margin-left: auto; }
+  .annot-sec { font-size: 12px; font-weight: 600; letter-spacing: .04em; color: var(--muted); margin: 12px 0 6px; }
+  .annot-sec:first-child { margin-top: 0; }
+  .annot-row { display: grid; grid-template-columns: minmax(0, 260px) minmax(0, 1fr); gap: 4px 12px; align-items: start; margin-bottom: 6px; }
+  .annot-row label { font-size: 14px; color: var(--fg); padding-top: 5px; }
+  .annot-row textarea { font: inherit; font-size: 14px; line-height: 1.45; color: var(--fg); background: var(--panel); border: 1px solid var(--line);
+    border-radius: 8px; padding: 4px 8px; width: 100%; resize: none; overflow: hidden; min-height: 32px; }
+  @media (max-width: 640px) { .annot-row { grid-template-columns: 1fr; } .annot-row label { padding-top: 0; } }
+  #annotPrint { display: none; }
   .hint { color: var(--muted); font-size: 13px; padding: 10px 2px; }
   #feedbackBtn { margin-left: auto; align-self: center; }
   #feedback { width: min(460px, calc(100% - 32px)); padding: 0; color: var(--fg); background: var(--panel);
@@ -96,6 +114,14 @@
     body { background: #fff; color: #000; }
     .no-print, details, #status, .hint { display: none !important; }
     .card { border: none; }
+    #annotPanel { display: none !important; }
+    #annotPrint { display: block; font-size: 12px; line-height: 1.4; padding: 0 16px; }
+    #annotPrint section { break-inside: avoid; margin-top: 14px; }
+    #annotPrint h2 { font-size: 14px; font-weight: 600; margin: 0 0 4px; }
+    #annotPrint h3 { font-size: 11px; letter-spacing: .04em; margin: 6px 0 2px; }
+    #annotPrint dl { display: grid; grid-template-columns: 240px 1fr; gap: 1px 12px; margin: 0; }
+    #annotPrint dt { color: #444; }
+    #annotPrint dd { margin: 0; white-space: pre-wrap; }
   }
 </style>
 </head>
@@ -143,6 +169,7 @@
       </div>
       <div class="group">
         <button id="notes" aria-pressed="false">Add notes</button>
+        <button id="annot" aria-pressed="false" aria-controls="annotPanel">Annotations</button>
         <button id="save">Save image</button>
         <button id="print">Print</button>
       </div>
@@ -162,12 +189,26 @@
         <div class="row"><button id="pRemove">Remove piece</button><button id="pDone">Done</button></div>
       </div>
       <div class="pop" id="notePop" hidden>
-        <input type="text" id="nText" maxlength="120" placeholder="Note" aria-label="Note text">
-        <div class="row"><button id="nDelete">Delete</button><button id="nDone">Done</button></div>
+        <div id="nWhen"></div>
+        <textarea id="nText" placeholder="Note" aria-label="Note text"></textarea>
+        <div class="row"><label for="nPlace">Show</label><select id="nPlace">
+          <option value="curve">Over the curve</option>
+          <option value="bottom">In the strip below the chart</option>
+          <option value="free">Where I dragged it</option>
+        </select></div>
+        <div class="row"><button id="nDelete">Delete</button><button id="nDone" title="Done (Esc)">Done</button></div>
       </div>
     </div>
     <canvas id="mini" aria-label="Whole program mini-map"></canvas>
     <div id="status" role="status" aria-live="polite"><span id="statusText"></span> <button id="undo" hidden>Undo remove</button></div>
+
+    <div id="annotPanel" class="no-print" hidden>
+      <div class="annot-head">
+        <label for="aPiece">Annotations for</label><select id="aPiece"></select>
+        <span class="src">Headings as in MIA 1 (Bonde, 2019)</span>
+      </div>
+      <div id="aForm"></div>
+    </div>
 
     <details class="no-print">
       <summary>More</summary>
@@ -193,10 +234,14 @@
   <p class="hint no-print">
     Drop audio files anywhere on the page. Drag a piece's title bar to reorder. Drag the chart to scroll, drag along the ruler to set the start point,
     and pinch or Alt+scroll to zoom. Double-click a title bar to rename it or change its color, and use the × on a title bar to remove a piece.
+    With Add notes on, click the chart to place a note; notes float over the curve, and clicking one opens it full size to read or edit.
+    Drag a note to put it anywhere on the chart, or below the baseline to move it to a strip under the chart.
+    Annotations opens a full description of each piece under MIA 1's headings; it prints with the chart and saves with the session.
     Save session keeps the chart, your order, titles, colors and notes in a file (not the audio). Opening it shows the chart straight away;
     to play it, add the same audio files again. Tick Include the audio files to save one .zip that also holds the audio, so it opens complete on any computer.
   </p>
 </main>
+<div id="annotPrint"></div>
 <dialog id="feedback" aria-labelledby="fbTitle">
   <form id="fbForm" novalidate>
     <h2 id="fbTitle">Send feedback</h2>
